@@ -127,8 +127,14 @@ export async function spotify<T = unknown>(
       continue;
     }
     if (response.ok) {
+      // Player commands answer with an empty body or, lately, a bare ID string rather than JSON.
       const text = await response.text();
-      return text ? (JSON.parse(text) as T) : null;
+      if (!text) return null;
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        return null;
+      }
     }
     throw await toSpotifyError(response);
   }

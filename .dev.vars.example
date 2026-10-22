@@ -1,0 +1,7 @@
+# Copy to .dev.vars for local development with `npm run dev`. Never commit .dev.vars.
+SPOTIFY_CLIENT_ID=
+SPOTIFY_CLIENT_SECRET=
+SPOTIFY_REFRESH_TOKEN=
+MCP_AUTH_TOKEN=
+# Optional: device to use when none is active and none is named in the prompt
+DEFAULT_DEVICE=

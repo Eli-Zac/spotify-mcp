@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "spotify-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  // Keep plaintext variables set in the Cloudflare dashboard (e.g. DEFAULT_DEVICE)
+  // when a new commit is deployed. Secrets are always kept.
+  "keep_vars": true,
+  "observability": { "enabled": true }
+}

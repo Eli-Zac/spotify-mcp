@@ -256,11 +256,27 @@ export function describeTrack(item: Track | null | undefined): string {
   return by ? `"${item.name}" by ${by}` : `"${item.name}"`;
 }
 
+// Spotify reports a new volume a few seconds after it's set, so remember what we set.
+const VOLUME_LAG_MS = 20_000;
+const recentVolumes = new Map<string, { percent: number; at: number }>();
+
+export function rememberVolume(device: Device | undefined, percent: number): void {
+  if (device?.id) recentVolumes.set(device.id, { percent, at: Date.now() });
+}
+
+/** The device's volume, preferring one we set in the last few seconds over Spotify's stale report. */
+export function currentVolume(device: Device): number | null {
+  const recent = device.id ? recentVolumes.get(device.id) : undefined;
+  if (recent && Date.now() - recent.at < VOLUME_LAG_MS) return recent.percent;
+  return device.volume_percent;
+}
+
 export function describeDevice(device: Device): string {
   const flags = [device.type, device.is_active ? "active" : null, device.is_restricted ? "restricted" : null]
     .filter(Boolean)
     .join(", ");
-  const volume = device.volume_percent !== null ? `, volume ${device.volume_percent}%` : "";
+  const percent = currentVolume(device);
+  const volume = percent !== null ? `, volume ${percent}%` : "";
   return `${device.name} (${flags}${volume})`;
 }
 

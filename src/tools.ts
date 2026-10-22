@@ -6,6 +6,8 @@ import {
   describeTrack,
   getDevices,
   matchDevice,
+  currentVolume,
+  rememberVolume,
   resolveDevice,
   spotify,
   startPlayback,
@@ -317,18 +319,32 @@ export function createServer(env: Env): McpServer {
     "set_volume",
     {
       title: "Set volume",
-      description: "Set the playback volume (0-100) on a device.",
+      description: [
+        "Set the playback volume on a device, either to an exact level (`volume_percent`) or relative to now (`change`).",
+        'For "turn it up/down" use change (e.g. +15 / -15); "a bit" ≈ 10, "a lot" ≈ 25.',
+        "Spotify takes a few seconds to report the new level, so trust this tool's result rather than re-checking.",
+      ].join(" "),
       inputSchema: z.object({
-        volume_percent: z.number().int().min(0).max(100),
+        volume_percent: z.number().int().min(0).max(100).optional().describe("Exact level, 0-100."),
+        change: z.number().int().min(-100).max(100).optional().describe("Relative change in percentage points, e.g. 15 or -15."),
         device: deviceParam,
       }),
     },
-    ({ volume_percent, device: wanted }) =>
+    ({ volume_percent, change, device: wanted }) =>
       run(async () => {
+        if (volume_percent === undefined && change === undefined) throw new SpotifyError("Provide `volume_percent` or `change`.");
         const device = await resolveDevice(env, wanted);
         if (device?.supports_volume === false) throw new SpotifyError(`${device.name} doesn't support remote volume control.`);
-        await spotify(env, "PUT", "/me/player/volume", { query: { volume_percent, device_id: device?.id ?? undefined } });
-        return `Volume set to ${volume_percent}%${where(device)}.`;
+
+        const before = device ? currentVolume(device) : null;
+        let target = volume_percent;
+        if (target === undefined) {
+          if (before === null) throw new SpotifyError("Couldn't read the current volume; give an exact `volume_percent` instead.");
+          target = Math.min(100, Math.max(0, before + change!));
+        }
+        await spotify(env, "PUT", "/me/player/volume", { query: { volume_percent: target, device_id: device?.id ?? undefined } });
+        rememberVolume(device, target);
+        return `Volume set to ${target}%${before !== null && before !== target ? ` (was ${before}%)` : ""}${where(device)}.`;
       }),
   );
 

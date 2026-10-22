@@ -1,3 +1,5 @@
+import { cleanSecret } from "./auth";
+
 const API_BASE = "https://api.spotify.com/v1";
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
 
@@ -34,7 +36,7 @@ interface TokenResponse {
 let cachedToken: { value: string; expiresAt: number } | null = null;
 
 function basicAuth(env: Env): string {
-  return `Basic ${btoa(`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`)}`;
+  return `Basic ${btoa(`${cleanSecret(env.SPOTIFY_CLIENT_ID)}:${cleanSecret(env.SPOTIFY_CLIENT_SECRET)}`)}`;
 }
 
 async function requestToken(env: Env, params: Record<string, string>): Promise<TokenResponse> {
@@ -75,16 +77,17 @@ export async function exchangeCode(env: Env, code: string, redirectUri: string):
 
 async function getAccessToken(env: Env): Promise<string> {
   if (cachedToken && cachedToken.expiresAt - 60_000 > Date.now()) return cachedToken.value;
-  if (!env.SPOTIFY_REFRESH_TOKEN) {
+  const refreshToken = cleanSecret(env.SPOTIFY_REFRESH_TOKEN);
+  if (!refreshToken) {
     throw new SpotifyError(
       "SPOTIFY_REFRESH_TOKEN is not set. Open /setup/<MCP_AUTH_TOKEN> on the worker to link your Spotify account.",
     );
   }
   const token = await requestToken(env, {
     grant_type: "refresh_token",
-    refresh_token: env.SPOTIFY_REFRESH_TOKEN,
+    refresh_token: refreshToken,
   });
-  if (token.refresh_token && token.refresh_token !== env.SPOTIFY_REFRESH_TOKEN) {
+  if (token.refresh_token && token.refresh_token !== refreshToken) {
     console.warn(
       "Spotify issued a new refresh token. If requests start failing, re-run /setup and update SPOTIFY_REFRESH_TOKEN.",
     );

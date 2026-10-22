@@ -1,5 +1,5 @@
 import { createMcpHandler, type McpHttpHandler } from "@modelcontextprotocol/server";
-import { createState, isAuthorized, verifyState } from "./auth";
+import { cleanSecret, createState, isAuthorized, verifyState } from "./auth";
 import { SPOTIFY_SCOPES, SpotifyError, exchangeCode } from "./spotify";
 import { createServer } from "./tools";
 
@@ -11,6 +11,9 @@ export default {
     const { pathname } = new URL(request.url);
 
     if (pathname === "/mcp" || pathname.startsWith("/mcp/")) {
+      if (!cleanSecret(env.MCP_AUTH_TOKEN)) {
+        return new Response("MCP_AUTH_TOKEN is not set on this Worker.", { status: 500 });
+      }
       if (!(await isAuthorized(request, env, "/mcp"))) {
         return new Response("Unauthorized", { status: 401 });
       }
@@ -21,18 +24,37 @@ export default {
     }
 
     if (pathname === "/setup" || pathname.startsWith("/setup/")) {
+      if (!cleanSecret(env.MCP_AUTH_TOKEN)) {
+        return html("Missing secret", `<p>The Worker can't see an <code>MCP_AUTH_TOKEN</code> secret. ${SECRET_HELP}</p>`, 500);
+      }
       if (!(await isAuthorized(request, env, "/setup"))) {
-        return html("Unauthorized", "<p>Open <code>/setup/&lt;MCP_AUTH_TOKEN&gt;</code>.</p>", 401);
+        return html(
+          "Unauthorized",
+          "<p>The token in this URL doesn't match the Worker's <code>MCP_AUTH_TOKEN</code> secret. Open <code>/setup/&lt;MCP_AUTH_TOKEN&gt;</code> with exactly the same value.</p>",
+          401,
+        );
       }
       return startSetup(request, env);
     }
 
     if (pathname === "/callback") return finishSetup(request, env);
 
-    if (pathname === "/") return new Response("Spotify MCP server is running.\n");
+    if (pathname === "/") return status(env);
     return new Response("Not found", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
+
+const SECRET_HELP =
+  "Add it in the Cloudflare dashboard under Workers &amp; Pages → spotify-mcp → <strong>Settings → Variables and Secrets</strong> (not the Build variables), as type <em>Secret</em>, then reload.";
+
+/** Shows which secrets the running Worker can see (never their values). */
+function status(env: Env): Response {
+  const names = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "MCP_AUTH_TOKEN", "SPOTIFY_REFRESH_TOKEN"] as const;
+  const rows = names.map((name) => `${cleanSecret(env[name]) ? "✓" : "✗"} ${name}`).join("\n");
+  return new Response(`Spotify MCP server is running.\n\nSecrets visible to this Worker:\n${rows}\n`, {
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
 
 // --- One-time Spotify account linking --------------------------------------
 
@@ -41,13 +63,13 @@ function callbackUrl(request: Request): string {
 }
 
 async function startSetup(request: Request, env: Env): Promise<Response> {
-  if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) {
+  if (!cleanSecret(env.SPOTIFY_CLIENT_ID) || !cleanSecret(env.SPOTIFY_CLIENT_SECRET)) {
     return html("Missing secrets", "<p>Set <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_CLIENT_SECRET</code> first.</p>", 500);
   }
   const authorize = new URL("https://accounts.spotify.com/authorize");
   authorize.search = new URLSearchParams({
     response_type: "code",
-    client_id: env.SPOTIFY_CLIENT_ID,
+    client_id: cleanSecret(env.SPOTIFY_CLIENT_ID),
     scope: SPOTIFY_SCOPES.join(" "),
     redirect_uri: callbackUrl(request),
     state: await createState(env.MCP_AUTH_TOKEN),

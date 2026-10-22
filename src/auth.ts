@@ -27,10 +27,16 @@ export function extractToken(request: Request, prefix: string): string | null {
   return null;
 }
 
+/** Secret values pasted into the dashboard sometimes pick up whitespace or quotes. */
+export function cleanSecret(value: string | undefined): string {
+  return (value ?? "").trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+}
+
 export async function isAuthorized(request: Request, env: Env, prefix: string): Promise<boolean> {
-  if (!env.MCP_AUTH_TOKEN) return false;
+  const expected = cleanSecret(env.MCP_AUTH_TOKEN);
+  if (!expected) return false;
   const token = extractToken(request, prefix);
-  return token !== null && (await safeEqual(token, env.MCP_AUTH_TOKEN));
+  return token !== null && (await safeEqual(token.trim(), expected));
 }
 
 // --- Signed OAuth `state` for the one-time /setup flow ---------------------
@@ -56,12 +62,14 @@ async function hmac(secret: string, message: string): Promise<string> {
 }
 
 export async function createState(secret: string): Promise<string> {
+  secret = cleanSecret(secret);
   const payload = `${Date.now()}.${crypto.randomUUID()}`;
   return `${payload}.${await hmac(secret, payload)}`;
 }
 
 export async function verifyState(secret: string, state: string | null): Promise<boolean> {
   if (!state) return false;
+  secret = cleanSecret(secret);
   const lastDot = state.lastIndexOf(".");
   if (lastDot < 0) return false;
   const payload = state.slice(0, lastDot);

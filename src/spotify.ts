@@ -10,6 +10,8 @@ export const SPOTIFY_SCOPES = [
   "playlist-read-private",
   "playlist-read-collaborative",
   "user-library-read",
+  // Lets market=from_token pick the versions of tracks that play in your country.
+  "user-read-private",
 ];
 
 /** An error whose message is safe and useful to show to Claude as a tool result. */
@@ -99,6 +101,9 @@ async function getAccessToken(env: Env): Promise<string> {
 
 // --- API -------------------------------------------------------------------
 
+// Set once Spotify refuses market=from_token for this token (missing user-read-private).
+let marketScopeMissing = false;
+
 type Query = Record<string, string | number | boolean | undefined>;
 
 export async function spotify<T = unknown>(
@@ -112,6 +117,8 @@ export async function spotify<T = unknown>(
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
 
+  if (marketScopeMissing && url.searchParams.get("market") === "from_token") url.searchParams.delete("market");
+
   for (let attempt = 0; ; attempt++) {
     const response = await fetch(url, {
       method,
@@ -124,6 +131,13 @@ export async function spotify<T = unknown>(
 
     if (response.status === 401 && attempt === 0) {
       cachedToken = null;
+      continue;
+    }
+    // market=from_token needs the user-read-private scope, which older setups lack;
+    // rather than fail, ask again without it.
+    if (response.status === 403 && url.searchParams.get("market") === "from_token") {
+      marketScopeMissing = true;
+      url.searchParams.delete("market");
       continue;
     }
     if (response.ok) {

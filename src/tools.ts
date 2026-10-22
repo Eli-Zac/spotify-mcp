@@ -19,6 +19,8 @@ import {
   findBlend,
   findPlaylist,
   likedSongsContext,
+  listBlends,
+  type Playlist,
   likedTrackUris,
   playlistTracksByDateAdded,
 } from "./library";
@@ -363,7 +365,8 @@ export function createServer(env: Env): McpServer {
     "list_my_playlists",
     {
       title: "List my playlists",
-      description: "List the user's own and followed playlists with their URIs (to pass to play as context_uri).",
+      description:
+        "List the user's own and followed playlists, plus their Spotify Blends, with URIs. Use this to answer \"what playlists/blends do I have?\".",
       inputSchema: z.object({
         limit: z.number().int().min(1).max(50).default(50),
         offset: z.number().int().min(0).default(0),
@@ -373,14 +376,23 @@ export function createServer(env: Env): McpServer {
     ({ limit, offset }) =>
       run(async () => {
         const result = await spotify<{
-          items: ({ name: string; uri: string; owner?: { display_name?: string } } | null)[];
+          items: (Playlist | null)[];
           total: number;
         }>(env, "GET", "/me/playlists", { query: { limit, offset } });
         const items = (result?.items ?? []).filter((item) => item !== null);
-        if (!items.length) return "No playlists found.";
         const lines = items.map((item) => `- ${item.name}${item.owner?.display_name ? ` (by ${item.owner.display_name})` : ""} — ${item.uri}`);
+        if (!lines.length) lines.push("No playlists found.");
         const total = result?.total ?? items.length;
         if (offset + items.length < total) lines.push(`(${total - offset - items.length} more; use offset ${offset + items.length})`);
+        if (offset === 0) {
+          const blends = await listBlends(env, items).catch(() => []);
+          lines.push(
+            "",
+            blends.length
+              ? `Blends (play with play_blend):\n${blends.map((blend) => `- ${blend.name} — ${blend.uri}`).join("\n")}`
+              : "Blends: none set up (they go in the BLENDS setting, since Spotify hides Blends from apps).",
+          );
+        }
         return lines.join("\n");
       }),
   );
@@ -479,7 +491,7 @@ export function createServer(env: Env): McpServer {
         const blend = await findBlend(env, person);
         const device = await resolveDevice(env, wantedDevice);
         await startPlaybackWithShuffle(env, device, { context_uri: blend.uri }, shuffle);
-        return `Playing your Blend with ${blend.person}${shuffle ? " on shuffle" : ""}${where(device)}.`;
+        return `Playing your ${blend.name}${shuffle ? " on shuffle" : ""}${where(device)}.`;
       }),
   );
 

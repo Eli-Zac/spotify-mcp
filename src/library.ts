@@ -212,7 +212,8 @@ export async function likedTrackUris(env: Env, order: Order): Promise<{ uris: st
 // --- Blends ----------------------------------------------------------------
 
 export interface Blend {
-  person: string;
+  /** Every name this Blend answers to (several BLENDS lines can share one link). */
+  people: string[];
   uri: string;
   name: string;
 }
@@ -228,7 +229,7 @@ export function parseBlendsSetting(value: string | undefined): Blend[] {
     .filter((match): match is RegExpMatchArray => match !== null)
     .map((match) => {
       const person = match[1]!.trim();
-      return { person, uri: toSpotifyUri(match[2]!), name: `Blend with ${person}` };
+      return { people: [person], uri: toSpotifyUri(match[2]!), name: `Blend with ${person}` };
     });
 }
 
@@ -242,23 +243,43 @@ function blendsFromPlaylists(playlists: Playlist[], me: Me): Blend[] {
       .split(/\s+\+\s+/)
       .map((part) => part.trim())
       .filter((part) => part && !myNames.includes(normalize(part)));
-    return [{ person: others.join(" + ") || playlist.name, uri: playlist.uri, name: playlist.name }];
+    return [{ people: [others.join(" + ") || playlist.name], uri: playlist.uri, name: playlist.name }];
   });
 }
 
-export async function findBlend(env: Env, person: string): Promise<Blend> {
+/** Merges entries that share a link, so aliases ("Sadie", "Seidey") count as one Blend. */
+function mergeByUri(blends: Blend[]): Blend[] {
+  const merged = new Map<string, Blend>();
+  for (const blend of blends) {
+    const existing = merged.get(blend.uri);
+    if (!existing) {
+      merged.set(blend.uri, { ...blend, people: [...blend.people] });
+      continue;
+    }
+    for (const person of blend.people) if (!existing.people.includes(person)) existing.people.push(person);
+    existing.name = `Blend with ${existing.people.join(" / ")}`;
+  }
+  return [...merged.values()];
+}
+
+/** Your Blends from the BLENDS setting plus any Spotify lists among your playlists. */
+export async function listBlends(env: Env, playlists?: Playlist[]): Promise<Blend[]> {
   const configured = parseBlendsSetting(env.BLENDS);
   let discovered: Blend[] = [];
   try {
-    discovered = blendsFromPlaylists(await listMyPlaylists(env), await getMe(env));
+    discovered = blendsFromPlaylists(playlists ?? (await listMyPlaylists(env)), await getMe(env));
   } catch (error) {
     if (!configured.length) throw error;
   }
-  const blends = [...configured, ...discovered.filter((blend) => !configured.some((c) => c.uri === blend.uri))];
+  return mergeByUri([...configured, ...discovered]);
+}
+
+export async function findBlend(env: Env, person: string): Promise<Blend> {
+  const blends = await listBlends(env);
   if (!blends.length) {
     throw new SpotifyError(
       'No Blends are set up. Spotify hides Blend playlists from apps, so add them to the BLENDS setting, one "name: link" per line (in the Spotify app: open the Blend → ⋯ → Share → Copy link).',
     );
   }
-  return fuzzyFind(blends, person, (blend) => [blend.person, blend.name], (blend) => blend.name, "Blend");
+  return fuzzyFind(blends, person, (blend) => [...blend.people, blend.name], (blend) => blend.name, "Blend");
 }

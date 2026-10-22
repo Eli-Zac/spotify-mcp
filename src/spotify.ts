@@ -203,6 +203,9 @@ export interface Artist {
 export interface Track {
   name: string;
   uri: string;
+  /** Set when Spotify swapped in your country's version of the track. */
+  linked_from?: { uri: string };
+  is_playable?: boolean;
   type: "track" | "episode";
   duration_ms: number;
   artists?: Artist[];
@@ -342,6 +345,34 @@ export async function transferPlayback(env: Env, deviceId: string, play: boolean
   await spotify(env, "PUT", "/me/player", { body: { device_ids: [deviceId], play } });
 }
 
+export interface PlayResult {
+  /** Spotify confirmed something is playing (and, for track lists, the right track). */
+  playing: boolean;
+  state: PlaybackState | null;
+}
+
+export async function getPlaybackState(env: Env): Promise<PlaybackState | null> {
+  return spotify<PlaybackState>(env, "GET", "/me/player", {
+    query: { additional_types: "episode", market: "from_token" },
+  });
+}
+
+/**
+ * Spotify accepts play commands it then can't carry out (e.g. a track that isn't
+ * available in your country), so check that playback really started.
+ */
+async function confirmPlayback(env: Env, expectedUri?: string): Promise<PlayResult> {
+  let state: PlaybackState | null = null;
+  for (const delay of [800, 1500, 2500]) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    state = await getPlaybackState(env).catch(() => null);
+    const item = state?.item;
+    const rightTrack = !expectedUri || item?.uri === expectedUri || item?.linked_from?.uri === expectedUri;
+    if (state?.is_playing && item && rightTrack) return { playing: true, state };
+  }
+  return { playing: false, state };
+}
+
 /**
  * Starts playback on a device. If the device was idle, Spotify sometimes refuses
  * a direct play command, so wake it with a transfer and try once more.
@@ -350,7 +381,7 @@ export async function startPlayback(
   env: Env,
   device: Device | undefined,
   body: Record<string, unknown>,
-): Promise<void> {
+): Promise<PlayResult> {
   const deviceId = device?.id ?? undefined;
   const send = () =>
     spotify(env, "PUT", "/me/player/play", {
@@ -366,6 +397,8 @@ export async function startPlayback(
     await new Promise((resolve) => setTimeout(resolve, 750));
     await send();
   }
+  const uris = body.uris as string[] | undefined;
+  return confirmPlayback(env, uris?.[0]);
 }
 
 /** Best effort: some devices refuse shuffle changes until they are playing. */
@@ -387,8 +420,9 @@ export async function startPlaybackWithShuffle(
   device: Device | undefined,
   body: Record<string, unknown>,
   shuffle: boolean,
-): Promise<void> {
+): Promise<PlayResult> {
   const setBefore = await trySetShuffle(env, device, shuffle);
-  await startPlayback(env, device, body);
+  const result = await startPlayback(env, device, body);
   if (!setBefore) await trySetShuffle(env, device, shuffle);
+  return result;
 }

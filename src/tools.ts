@@ -12,9 +12,11 @@ import {
   spotify,
   startPlayback,
   startPlaybackWithShuffle,
+  getPlaybackState,
+  type Device,
+  type PlayResult,
   toSpotifyUri,
   transferPlayback,
-  type PlaybackState,
 } from "./spotify";
 import {
   MAX_PLAY_URIS,
@@ -49,6 +51,7 @@ type SearchType = (typeof searchTypes)[number];
 interface SearchItem {
   name: string;
   uri: string;
+  is_playable?: boolean;
   artists?: { name: string }[];
   owner?: { display_name?: string };
   album?: { name: string };
@@ -85,11 +88,25 @@ function describeItem(item: SearchItem, type: SearchType): string {
 }
 
 async function search(env: Env, query: string, type: SearchType, limit: number): Promise<SearchItem[]> {
-  const result = await spotify<SearchResponse>(env, "GET", "/search", { query: { q: query, type, limit } });
-  return (result?.[`${type}s`]?.items ?? []).filter((item): item is SearchItem => item !== null);
+  // market=from_token returns the versions of tracks that play in the user's country.
+  const result = await spotify<SearchResponse>(env, "GET", "/search", {
+    query: { q: query, type, limit, market: "from_token" },
+  });
+  return (result?.[`${type}s`]?.items ?? []).filter(
+    (item): item is SearchItem => item !== null && item.is_playable !== false,
+  );
 }
 
 const where = (device: { name: string } | undefined) => (device ? ` on ${device.name}` : "");
+
+/** Reports what Spotify is actually playing after a play command, or that nothing started. */
+function played(intro: string, result: PlayResult, device: Device | undefined): string {
+  if (result.playing) return `${intro}${where(device)}. Now playing ${describeTrack(result.state?.item)}.`;
+  return [
+    `Spotify accepted the command (${intro.charAt(0).toLowerCase()}${intro.slice(1)}${where(device)}) but nothing has started playing.`,
+    "The track may not be available in the user's country, or the device may need Spotify opened. Try a different version of the song (search again), an album or playlist, or another device. Don't claim it's playing.",
+  ].join(" ");
+}
 
 export function createServer(env: Env): McpServer {
   const server = new McpServer({ name: "spotify-playback", version: "1.0.0" }, { instructions: INSTRUCTIONS });
@@ -119,10 +136,9 @@ export function createServer(env: Env): McpServer {
     },
     () =>
       run(async () => {
-        const state = await spotify<PlaybackState>(env, "GET", "/me/player", {
-          query: { additional_types: "episode" },
-        });
+        const state = await getPlaybackState(env);
         if (!state) return "Nothing is playing and no device is active.";
+        if (!state.item) return `Nothing is loaded on ${describeDevice(state.device)}.`;
         const progress = state.progress_ms !== null ? Math.round(state.progress_ms / 1000) : null;
         const duration = state.item ? Math.round(state.item.duration_ms / 1000) : null;
         return [
@@ -203,7 +219,7 @@ export function createServer(env: Env): McpServer {
           label = toSpotifyUri(args.context_uri);
           body.context_uri = label;
         } else if (args.query) {
-          const [match] = await search(env, args.query, args.query_type, 1);
+          const [match] = await search(env, args.query, args.query_type, 5);
           if (!match) throw new SpotifyError(`No ${args.query_type} found for "${args.query}".`);
           if (args.query_type === "track") body.uris = [match.uri];
           else body.context_uri = match.uri;
@@ -216,8 +232,8 @@ export function createServer(env: Env): McpServer {
         if (args.position_ms !== undefined) body.position_ms = args.position_ms;
 
         const device = await resolveDevice(env, args.device);
-        await startPlayback(env, device, body);
-        return Object.keys(body).length ? `Now playing ${label}${where(device)}.` : `Resumed playback${where(device)}.`;
+        const result = await startPlayback(env, device, body);
+        return played(Object.keys(body).length ? `Started ${label}` : "Resumed playback", result, device);
       }),
   );
 
@@ -281,7 +297,7 @@ export function createServer(env: Env): McpServer {
           target = toSpotifyUri(uri);
           label = target;
         } else if (query) {
-          const [match] = await search(env, query, "track", 1);
+          const [match] = await search(env, query, "track", 5);
           if (!match) throw new SpotifyError(`No track found for "${query}".`);
           target = match.uri;
           label = describeItem(match, "track");
@@ -436,20 +452,20 @@ export function createServer(env: Env): McpServer {
         const playlist = await findPlaylist(env, wanted);
         if (order === "playlist" || order === "shuffle") {
           const device = await resolveDevice(env, wantedDevice);
-          await startPlaybackWithShuffle(env, device, { context_uri: playlist.uri }, order === "shuffle");
-          return `Playing "${playlist.name}"${order === "shuffle" ? " on shuffle" : ""}${where(device)}.`;
+          const result = await startPlaybackWithShuffle(env, device, { context_uri: playlist.uri }, order === "shuffle");
+          return played(`Started "${playlist.name}"${order === "shuffle" ? " on shuffle" : ""}`, result, device);
         }
 
         const tracks = await playlistTracksByDateAdded(env, playlist, order);
         if (!tracks.uris.length) throw new SpotifyError(`"${playlist.name}" has no playable tracks.`);
         const device = await resolveDevice(env, wantedDevice);
-        await startPlaybackWithShuffle(env, device, { uris: tracks.uris }, false);
+        const result = await startPlaybackWithShuffle(env, device, { uris: tracks.uris }, false);
         const label = order === "newest_first" ? "newest to oldest" : "oldest to newest";
         const partial =
           tracks.uris.length < tracks.total
             ? ` (the ${tracks.uris.length} ${order === "newest_first" ? "most recently" : "earliest"} added of ${tracks.total} tracks${tracks.sorted < tracks.total ? `, sorted from ${tracks.sorted} read` : ""})`
             : "";
-        return `Playing "${playlist.name}" ${label}${partial}${where(device)}.`;
+        return played(`Started "${playlist.name}" ${label}${partial}`, result, device);
       }),
   );
 
@@ -469,24 +485,24 @@ export function createServer(env: Env): McpServer {
           const device = await resolveDevice(env, wantedDevice);
           const shuffle = order === "shuffle";
           try {
-            await startPlaybackWithShuffle(env, device, { context_uri: await likedSongsContext(env) }, shuffle);
-            return `Playing your Liked Songs${shuffle ? " on shuffle" : ", newest first"}${where(device)}.`;
+            const result = await startPlaybackWithShuffle(env, device, { context_uri: await likedSongsContext(env) }, shuffle);
+            if (result.playing) return played(`Started your Liked Songs${shuffle ? " on shuffle" : ", newest first"}`, result, device);
           } catch (error) {
-            // Fall back to an explicit track list if Spotify won't play the Liked Songs context.
             if (!(error instanceof SpotifyError) || error.reason === "NO_ACTIVE_DEVICE") throw error;
-            const liked = await likedTrackUris(env, "newest_first");
-            if (!liked.uris.length) throw new SpotifyError("You don't have any Liked Songs yet.");
-            await startPlaybackWithShuffle(env, device, { uris: liked.uris }, shuffle);
-            return `Playing your ${liked.uris.length} most recent Liked Songs${shuffle ? " on shuffle" : ""}${where(device)}.`;
           }
+          // Spotify wouldn't play the Liked Songs collection directly, so send the tracks instead.
+          const liked = await likedTrackUris(env, "newest_first");
+          if (!liked.uris.length) throw new SpotifyError("You don't have any Liked Songs yet.");
+          const result = await startPlaybackWithShuffle(env, device, { uris: liked.uris }, shuffle);
+          return played(`Started your ${liked.uris.length} most recent Liked Songs${shuffle ? " on shuffle" : ""}`, result, device);
         }
 
         const liked = await likedTrackUris(env, "oldest_first");
         if (!liked.uris.length) throw new SpotifyError("You don't have any Liked Songs yet.");
         const device = await resolveDevice(env, wantedDevice);
-        await startPlaybackWithShuffle(env, device, { uris: liked.uris }, false);
+        const result = await startPlaybackWithShuffle(env, device, { uris: liked.uris }, false);
         const scope = liked.uris.length < liked.total ? `your ${liked.uris.length} earliest Liked Songs` : "your Liked Songs";
-        return `Playing ${scope}, oldest first${where(device)}.`;
+        return played(`Started ${scope}, oldest first`, result, device);
       }),
   );
 
@@ -506,8 +522,8 @@ export function createServer(env: Env): McpServer {
       run(async () => {
         const blend = await findBlend(env, person);
         const device = await resolveDevice(env, wantedDevice);
-        await startPlaybackWithShuffle(env, device, { context_uri: blend.uri }, shuffle);
-        return `Playing your ${blend.name}${shuffle ? " on shuffle" : ""}${where(device)}.`;
+        const result = await startPlaybackWithShuffle(env, device, { context_uri: blend.uri }, shuffle);
+        return played(`Started your ${blend.name}${shuffle ? " on shuffle" : ""}`, result, device);
       }),
   );
 

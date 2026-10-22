@@ -45,7 +45,7 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 const SECRET_HELP =
-  "Add it in the Cloudflare dashboard under Workers &amp; Pages → spotify-mcp → <strong>Settings → Variables and Secrets</strong> (not the Build variables), as type <em>Secret</em>, then reload.";
+  "Add it as a GitHub secret (repo <strong>Settings → Environments → production</strong>), then run the <strong>Deploy</strong> workflow under the repo's Actions tab.";
 
 /** Shows which secrets the running Worker can see (never their values). */
 function status(env: Env): Response {
@@ -97,8 +97,8 @@ async function finishSetup(request: Request, env: Env): Promise<Response> {
     return html(
       "Spotify linked",
       `<p>Signed in as <strong>${escape(me.display_name ?? me.id ?? "unknown")}</strong>.</p>
-<p>Copy this refresh token and save it as the Worker secret <code>SPOTIFY_REFRESH_TOKEN</code>
-(Cloudflare dashboard → Workers &amp; Pages → this worker → Settings → Variables and Secrets → Add → type <em>Secret</em>):</p>
+<p>Copy this refresh token and save it as the GitHub secret <code>SPOTIFY_REFRESH_TOKEN</code>
+(repo Settings → Environments → production), then run the <strong>Deploy</strong> workflow again from the Actions tab:</p>
 <textarea readonly rows="4" onclick="this.select()">${escape(token.refresh_token)}</textarea>
 <p>Treat it like a password. This page isn't stored anywhere; close it once you've saved the secret.</p>`,
     );

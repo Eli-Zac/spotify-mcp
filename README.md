@@ -2,7 +2,7 @@
 
 A private, single-user [MCP](https://modelcontextprotocol.io) server that lets Claude control Spotify playback on your devices. When Claude picks a song it can start it, and you can say which device to use ("play something chill **on the kitchen speaker**").
 
-It runs as one Cloudflare Worker with no databases or other bindings. Your Spotify credentials are stored as Worker secrets, and every request has to present a secret token, so only you can use it.
+It runs as one Cloudflare Worker with no databases or other bindings. Your credentials live in GitHub secrets, and GitHub Actions copies them into the Worker when it deploys. Every request has to present a secret token, so only you can use it.
 
 ## Tools
 
@@ -30,8 +30,8 @@ It runs as one Cloudflare Worker with no databases or other bindings. Your Spoti
 
 1. Go to <https://developer.spotify.com/dashboard> and click **Create app**.
 2. Tick **Web API**.
-3. Add this redirect URI, using your own workers.dev subdomain (it's shown in the Cloudflare dashboard under *Workers & Pages*):
-   `https://spotify-mcp.<your-subdomain>.workers.dev/callback`
+3. Add this redirect URI. The host is your Worker's custom domain, or `spotify-mcp.<your-subdomain>.workers.dev`:
+   `https://<your-worker-host>/callback`
 4. Save. Then copy the **Client ID** and **Client secret** from *Settings*.
 
 ### 2. Make an access token for the MCP endpoint
@@ -42,37 +42,44 @@ This is the password that keeps the server private. Generate a long random strin
 openssl rand -hex 32
 ```
 
-### 3. Deploy on Cloudflare
+### 3. Add the secrets to GitHub
 
-1. In the Cloudflare dashboard, go to **Workers & Pages → Create → Import a repository** and pick this repo. Keep the defaults: the project name `spotify-mcp`, which must match `name` in `wrangler.jsonc`, and the deploy command `npx wrangler deploy`.
-2. Once it has deployed, open the Worker, go to **Settings → Variables and Secrets**, and add these as **Secret** values:
+Pushes to `main` are deployed by GitHub Actions (`.github/workflows/deploy.yml`). The workflow copies your GitHub secrets into the Worker and then deploys it.
 
-   | Name | Value |
+1. **Create a Cloudflare API token.** In the Cloudflare dashboard, go to **My Profile → API Tokens → Create Token** and use the **Edit Cloudflare Workers** template.
+2. **Add the secrets in GitHub.** In the repo, go to **Settings → Environments → New environment** and name it `production`. Add these as **Environment secrets**. Plain repository secrets under *Settings → Secrets and variables → Actions* work too.
+
+   | Secret | Value |
    | --- | --- |
+   | `CLOUDFLARE_API_TOKEN` | the token from step 3.1 |
    | `SPOTIFY_CLIENT_ID` | from step 1 |
    | `SPOTIFY_CLIENT_SECRET` | from step 1 |
    | `MCP_AUTH_TOKEN` | from step 2 |
+   | `SPOTIFY_REFRESH_TOKEN` | leave it out for now; you get it in step 4 |
 
-   Don't commit these to GitHub or put them in the build settings. Worker secrets are encrypted, the running Worker can read them, and they're kept on every redeploy.
+3. **Run the workflow.** Go to **Actions → Deploy → Run workflow**, or push to `main`.
+4. **Turn off Cloudflare's own Git builds**, so each push isn't deployed twice. In the Cloudflare dashboard, go to **Workers & Pages → spotify-mcp → Settings → Build** and disconnect the repository.
+
+A secret you leave out of GitHub isn't touched, so the Worker keeps whatever value it already has. You can check which secrets the Worker can see at `https://<your-worker-host>/`. It shows ✓ or ✗ for each one and never shows the values.
 
 ### 4. Link your Spotify account (one time)
 
-1. Open `https://spotify-mcp.<your-subdomain>.workers.dev/setup/<MCP_AUTH_TOKEN>` in your browser.
+1. Open `https://<your-worker-host>/setup/<MCP_AUTH_TOKEN>` in your browser.
 2. Approve access on Spotify. You'll come back to a page that shows a refresh token.
-3. Add that token as another **Secret** called `SPOTIFY_REFRESH_TOKEN`.
+3. Add that token as the GitHub secret `SPOTIFY_REFRESH_TOKEN`, then run the **Deploy** workflow again.
 
 ### 5. Connect Claude
 
 **Claude (web, desktop and mobile):** go to **Settings → Connectors → Add custom connector** and use this URL, with no OAuth settings:
 
 ```
-https://spotify-mcp.<your-subdomain>.workers.dev/mcp/<MCP_AUTH_TOKEN>
+https://<your-worker-host>/mcp/<MCP_AUTH_TOKEN>
 ```
 
 **Claude Code** can send the token as a header instead:
 
 ```sh
-claude mcp add --transport http spotify https://spotify-mcp.<your-subdomain>.workers.dev/mcp \
+claude mcp add --transport http spotify https://<your-worker-host>/mcp \
   --header "Authorization: Bearer <MCP_AUTH_TOKEN>"
 ```
 
@@ -80,7 +87,7 @@ Then try: *"Pick a good song for a rainy morning and play it on my phone"*, *"mo
 
 ### Optional: default device
 
-Add a plain-text variable `DEFAULT_DEVICE` (for example `Kitchen Speaker`). It's used when nothing is playing and you don't name a device.
+Add a GitHub variable or secret called `DEFAULT_DEVICE` (for example `Kitchen Speaker`) and run the workflow again. It's used when nothing is playing and you don't name a device.
 
 ## Privacy and security
 
@@ -103,6 +110,7 @@ For local `/setup`, also add `http://127.0.0.1:8787/callback` as a redirect URI 
 ## Troubleshooting
 
 - **"No Spotify device matches…" or "Nothing is playing…"**: open Spotify on the device you want. Asleep or closed devices aren't listed.
-- **"Spotify rejected the refresh token"**: run `/setup/<token>` again and update `SPOTIFY_REFRESH_TOKEN`. Refresh tokens can expire or be revoked.
+- **"Spotify rejected the refresh token"**: run `/setup/<token>` again, update the `SPOTIFY_REFRESH_TOKEN` GitHub secret and re-run the workflow. Refresh tokens can expire or be revoked.
+- **Secrets show ✗ on the status page**: check that the Deploy workflow ran without errors, and that its "Sync secrets" step lists them. Its log never shows the values.
 - **`INVALID_CLIENT: Invalid redirect URI`** during setup: the redirect URI in the Spotify dashboard has to match `https://<your-worker-host>/callback` exactly.
 - **Logs**: open the Worker in the Cloudflare dashboard and go to **Observability**.

@@ -101,6 +101,13 @@ const where = (device: { name: string } | undefined) => (device ? ` on ${device.
 
 /** Reports what Spotify is actually playing after a play command, or that nothing started. */
 function played(intro: string, result: PlayResult, device: Device | undefined): string {
+  if (result.playing && result.viaAlbum) {
+    const { queued, dropped } = result.viaAlbum;
+    const rest = queued
+      ? ` The other ${queued} track${queued === 1 ? " is" : "s are"} queued in order${dropped ? ` (${dropped} more didn't fit)` : ""}, then the album continues.`
+      : " When it ends, the rest of its album plays.";
+    return `${intro}${where(device)}. Now playing ${describeTrack(result.state?.item)} (started from its album, because this device ignores direct track lists).${rest}`;
+  }
   if (result.playing) return `${intro}${where(device)}. Now playing ${describeTrack(result.state?.item)}.`;
   return [
     `Spotify accepted the command (${intro.charAt(0).toLowerCase()}${intro.slice(1)}${where(device)}) but nothing has started playing.`,

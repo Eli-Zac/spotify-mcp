@@ -363,6 +363,8 @@ export interface PlayResult {
   /** Spotify confirmed something is playing (and, for track lists, the right track). */
   playing: boolean;
   state: PlaybackState | null;
+  /** Set when a track list was started from the first track's album, with the rest queued. */
+  viaAlbum?: { queued: number; dropped: number };
 }
 
 export async function getPlaybackState(env: Env): Promise<PlaybackState | null> {
@@ -375,9 +377,9 @@ export async function getPlaybackState(env: Env): Promise<PlaybackState | null> 
  * Spotify accepts play commands it then can't carry out (e.g. a track that isn't
  * available in your country), so check that playback really started.
  */
-async function confirmPlayback(env: Env, expectedUri?: string): Promise<PlayResult> {
+async function confirmPlayback(env: Env, expectedUri: string | undefined, delays: number[]): Promise<PlayResult> {
   let state: PlaybackState | null = null;
-  for (const delay of [800, 1500, 2500]) {
+  for (const delay of delays) {
     await new Promise((resolve) => setTimeout(resolve, delay));
     state = await getPlaybackState(env).catch(() => null);
     const item = state?.item;
@@ -387,16 +389,7 @@ async function confirmPlayback(env: Env, expectedUri?: string): Promise<PlayResu
   return { playing: false, state };
 }
 
-/**
- * Starts playback on a device. If the device was idle, Spotify sometimes refuses
- * a direct play command, so wake it with a transfer and try once more.
- */
-export async function startPlayback(
-  env: Env,
-  device: Device | undefined,
-  body: Record<string, unknown>,
-): Promise<PlayResult> {
-  const deviceId = device?.id ?? undefined;
+async function sendPlay(env: Env, deviceId: string | undefined, body: Record<string, unknown>): Promise<void> {
   const send = () =>
     spotify(env, "PUT", "/me/player/play", {
       query: { device_id: deviceId },
@@ -405,14 +398,65 @@ export async function startPlayback(
   try {
     await send();
   } catch (error) {
+    // An idle device sometimes refuses a direct play command; wake it with a transfer and retry once.
     const retryable = error instanceof SpotifyError && (error.status === 404 || error.status === 502);
     if (!deviceId || !retryable) throw error;
     await transferPlayback(env, deviceId, false);
     await new Promise((resolve) => setTimeout(resolve, 750));
     await send();
   }
+}
+
+// Some clients (e.g. the desktop app) accept a list of track URIs and then load nothing.
+// Remember them so later requests go straight to the album workaround.
+const devicesIgnoringUris = new Set<string>();
+// Leave room in the Workers free plan's 50 outbound requests per call.
+const MAX_QUEUED = 25;
+
+/**
+ * Plays a track list by starting the first track inside its album (which these
+ * clients do honour) and queueing the rest in order.
+ */
+async function playViaAlbum(env: Env, deviceId: string | undefined, body: Record<string, unknown>): Promise<PlayResult> {
+  const [first, ...rest] = body.uris as string[];
+  const id = first?.startsWith("spotify:track:") ? first.split(":")[2] : undefined;
+  if (!id) return { playing: false, state: null };
+  const track = await spotify<{ uri: string; album?: { uri: string } }>(env, "GET", `/tracks/${id}`, {
+    query: { market: "from_token" },
+  });
+  if (!track?.album?.uri) return { playing: false, state: null };
+
+  const { uris: _, ...options } = body;
+  await sendPlay(env, deviceId, { ...options, context_uri: track.album.uri, offset: { uri: track.uri } });
+  const result = await confirmPlayback(env, first, [800, 1500, 2500]);
+  if (!result.playing) return result;
+
+  const toQueue = rest.slice(0, MAX_QUEUED);
+  for (const uri of toQueue) {
+    await spotify(env, "POST", "/me/player/queue", { query: { uri, device_id: deviceId } });
+  }
+  return { ...result, viaAlbum: { queued: toQueue.length, dropped: rest.length - toQueue.length } };
+}
+
+export async function startPlayback(
+  env: Env,
+  device: Device | undefined,
+  body: Record<string, unknown>,
+): Promise<PlayResult> {
+  const deviceId = device?.id ?? undefined;
   const uris = body.uris as string[] | undefined;
-  return confirmPlayback(env, uris?.[0]);
+  if (!uris?.length) {
+    await sendPlay(env, deviceId, body);
+    return confirmPlayback(env, undefined, [800, 1500, 2500]);
+  }
+
+  if (!deviceId || !devicesIgnoringUris.has(deviceId)) {
+    await sendPlay(env, deviceId, body);
+    const result = await confirmPlayback(env, uris[0], [800, 1500]);
+    if (result.playing) return result;
+    if (deviceId) devicesIgnoringUris.add(deviceId);
+  }
+  return playViaAlbum(env, deviceId, body);
 }
 
 /** Best effort: some devices refuse shuffle changes until they are playing. */

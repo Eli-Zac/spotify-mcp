@@ -438,12 +438,28 @@ async function playViaAlbum(env: Env, deviceId: string | undefined, body: Record
   return { ...result, viaAlbum: { queued: toQueue.length, dropped: rest.length - toQueue.length } };
 }
 
+/**
+ * The desktop app resumes an album or playlist wherever it was last left (often its
+ * last track) unless told where to start, so start new content from the top.
+ */
+function fromTheStart(body: Record<string, unknown>, shuffle: boolean): Record<string, unknown> {
+  if (!body.context_uri && !body.uris) return body; // plain resume
+  const start: Record<string, unknown> = { position_ms: 0, ...body };
+  const context = typeof body.context_uri === "string" ? body.context_uri : "";
+  // Offsets only apply to albums and playlists (Liked Songs is one); with shuffle on, let Spotify pick.
+  const takesOffset = /^spotify:(album|playlist):/.test(context) || /^spotify:user:[^:]+:collection$/.test(context);
+  if (!body.offset && !shuffle && takesOffset) start.offset = { position: 0 };
+  return start;
+}
+
 export async function startPlayback(
   env: Env,
   device: Device | undefined,
-  body: Record<string, unknown>,
+  requested: Record<string, unknown>,
+  options: { shuffle?: boolean } = {},
 ): Promise<PlayResult> {
   const deviceId = device?.id ?? undefined;
+  const body = fromTheStart(requested, options.shuffle ?? false);
   const uris = body.uris as string[] | undefined;
   if (!uris?.length) {
     await sendPlay(env, deviceId, body);
@@ -480,7 +496,7 @@ export async function startPlaybackWithShuffle(
   shuffle: boolean,
 ): Promise<PlayResult> {
   const setBefore = await trySetShuffle(env, device, shuffle);
-  const result = await startPlayback(env, device, body);
+  const result = await startPlayback(env, device, body, { shuffle });
   if (!setBefore) await trySetShuffle(env, device, shuffle);
   return result;
 }

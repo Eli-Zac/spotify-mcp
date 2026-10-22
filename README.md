@@ -19,6 +19,9 @@ It runs as one Cloudflare Worker with no databases or other bindings. Your crede
 | `set_volume` | Sets the volume from 0 to 100. |
 | `set_playback_options` | Turns shuffle on or off and sets the repeat mode. |
 | `list_my_playlists` | Lists your playlists so Claude can play them. |
+| `play_playlist` | Plays one of your playlists by (rough) name, in normal order, shuffled, **newest to oldest** or oldest to newest (by date added). |
+| `play_liked_songs` | Plays your Liked Songs: newest first, oldest first, or shuffled. |
+| `play_blend` | Plays your Blend with someone ("play my blend with jak" finds Jack). |
 
 **Devices** can be given by name, part of a name ("kitchen", "iphone"), type ("phone", "speaker", "computer", "tv") or ID. If you don't name one, the server picks in this order: the device that's playing now, then `DEFAULT_DEVICE` (if you set it), then your only device if there's just one. Otherwise it asks Claude to choose. A device only shows up while Spotify is open on it.
 
@@ -85,9 +88,25 @@ claude mcp add --transport http spotify https://<your-worker-host>/mcp \
 
 Then try: *"Pick a good song for a rainy morning and play it on my phone"*, *"move it to the living room speaker"*, *"stop the music"*.
 
+### Optional: Blends
+
+Spotify hides Blend playlists from apps, so list yours once in a GitHub **variable** called `BLENDS` (repo **Settings → Secrets and variables → Actions → Variables**, or the `production` environment). Put one Blend per line as `name: link`:
+
+```
+Jack: https://open.spotify.com/playlist/37i9dQZF1EJ...
+Rhylan: https://open.spotify.com/playlist/37i9dQZF1EJ...
+```
+
+To get a link, open the Blend in the Spotify app, then go to **⋯ → Share → Copy link**. Run the Deploy workflow afterwards. Names are matched loosely, so "jak" finds Jack and "rylan" finds Rhylan.
+
 ### Optional: default device
 
 Add a GitHub variable or secret called `DEFAULT_DEVICE` (for example `Kitchen Speaker`) and run the workflow again. It's used when nothing is playing and you don't name a device.
+
+## Notes on ordering
+
+- Sorting a playlist **newest to oldest** reads its tracks and their "date added". Spotify only allows that for playlists you own or collaborate on; other playlists can still be played in order or shuffled.
+- A sorted playlist, or Liked Songs oldest first, plays up to 100 tracks as a queue. Liked Songs newest first plays your whole library.
 
 ## Privacy and security
 
@@ -113,4 +132,5 @@ For local `/setup`, also add `http://127.0.0.1:8787/callback` as a redirect URI 
 - **"Spotify rejected the refresh token"**: run `/setup/<token>` again, update the `SPOTIFY_REFRESH_TOKEN` GitHub secret and re-run the workflow. Refresh tokens can expire or be revoked.
 - **Secrets show ✗ on the status page**: check that the Deploy workflow ran without errors, and that its "Sync secrets" step lists them. Its log never shows the values.
 - **`INVALID_CLIENT: Invalid redirect URI`** during setup: the redirect URI in the Spotify dashboard has to match `https://<your-worker-host>/callback` exactly.
+- **"missing a permission"** when playing Liked Songs: Liked Songs needs a permission added after your first setup. Run `/setup/<token>` again, update `SPOTIFY_REFRESH_TOKEN` and re-run the workflow.
 - **Logs**: open the Worker in the Cloudflare dashboard and go to **Observability**.

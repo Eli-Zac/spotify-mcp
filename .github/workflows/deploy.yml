@@ -42,6 +42,7 @@ jobs:
           MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
           SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
           DEFAULT_DEVICE: ${{ vars.DEFAULT_DEVICE || secrets.DEFAULT_DEVICE }}
+          BLENDS: ${{ vars.BLENDS || secrets.BLENDS }}
         run: |
           secrets_json="$(node scripts/sync-secrets.mjs)"
           if [ "$secrets_json" != "{}" ]; then

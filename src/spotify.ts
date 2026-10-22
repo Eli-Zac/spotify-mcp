@@ -9,6 +9,7 @@ export const SPOTIFY_SCOPES = [
   "user-read-currently-playing",
   "playlist-read-private",
   "playlist-read-collaborative",
+  "user-library-read",
 ];
 
 /** An error whose message is safe and useful to show to Claude as a tool result. */
@@ -159,6 +160,13 @@ async function toSpotifyError(response: Response): Promise<SpotifyError> {
       "NO_ACTIVE_DEVICE",
     );
   }
+  if (response.status === 403 && /scope/i.test(message)) {
+    return new SpotifyError(
+      "Your Spotify link is missing a permission this needs (it was added in an update). Open /setup/<MCP_AUTH_TOKEN> again, then save the new refresh token as SPOTIFY_REFRESH_TOKEN and redeploy.",
+      403,
+      "INSUFFICIENT_SCOPE",
+    );
+  }
   if (reason === "PREMIUM_REQUIRED") {
     return new SpotifyError("Spotify Premium is required to control playback.", response.status, reason);
   }
@@ -250,7 +258,7 @@ export function describeDevice(device: Device): string {
   return `${device.name} (${flags}${volume})`;
 }
 
-const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+export const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 function deviceList(devices: Device[]): string {
   return devices.length
@@ -336,4 +344,29 @@ export async function startPlayback(
     await new Promise((resolve) => setTimeout(resolve, 750));
     await send();
   }
+}
+
+/** Best effort: some devices refuse shuffle changes until they are playing. */
+export async function trySetShuffle(env: Env, device: Device | undefined, state: boolean): Promise<boolean> {
+  try {
+    await spotify(env, "PUT", "/me/player/shuffle", { query: { state, device_id: device?.id ?? undefined } });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Starts playback with a fixed shuffle state. Shuffle is set before playing so the
+ * first track respects it, and again afterwards in case the device was idle.
+ */
+export async function startPlaybackWithShuffle(
+  env: Env,
+  device: Device | undefined,
+  body: Record<string, unknown>,
+  shuffle: boolean,
+): Promise<void> {
+  const setBefore = await trySetShuffle(env, device, shuffle);
+  await startPlayback(env, device, body);
+  if (!setBefore) await trySetShuffle(env, device, shuffle);
 }

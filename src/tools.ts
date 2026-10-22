@@ -9,16 +9,28 @@ import {
   resolveDevice,
   spotify,
   startPlayback,
+  startPlaybackWithShuffle,
   toSpotifyUri,
   transferPlayback,
   type PlaybackState,
 } from "./spotify";
+import {
+  MAX_PLAY_URIS,
+  findBlend,
+  findPlaylist,
+  likedSongsContext,
+  likedTrackUris,
+  playlistTracksByDateAdded,
+} from "./library";
 
 const INSTRUCTIONS = `Controls Spotify playback on the owner's devices (phone, computer, speakers, TV...).
 - When you pick a song for the user, call \`play\` to actually start it (with \`query\` or Spotify URIs).
 - If the user names a device ("play it on the kitchen speaker", "on my phone"), pass that name as \`device\`; fuzzy names are fine.
 - If you're unsure which devices exist, call \`list_devices\`. Devices only appear while Spotify is open on them.
-- To stop the music, call \`pause\`.`;
+- To stop the music, call \`pause\`.
+- "Play my <name> playlist" → \`play_playlist\`; "newest to oldest" / "latest first" → order newest_first.
+- "Play my likes" / "liked songs" → \`play_liked_songs\`.
+- "Play my blend with <person>" → \`play_blend\` with whatever name the user gave, even if it's rough or misspelled.`;
 
 const deviceParam = z
   .string()
@@ -370,6 +382,104 @@ export function createServer(env: Env): McpServer {
         const total = result?.total ?? items.length;
         if (offset + items.length < total) lines.push(`(${total - offset - items.length} more; use offset ${offset + items.length})`);
         return lines.join("\n");
+      }),
+  );
+
+  server.registerTool(
+    "play_playlist",
+    {
+      title: "Play a playlist",
+      description: [
+        "Play one of the user's playlists, optionally ordered by when tracks were added.",
+        "`playlist` can be (part of) the playlist's name, a playlist URI, or an open.spotify.com link.",
+        `newest_first / oldest_first sort by date added and play up to ${MAX_PLAY_URIS} tracks; Spotify only allows this for playlists the user owns or collaborates on.`,
+      ].join(" "),
+      inputSchema: z.object({
+        playlist: z.string().min(1).describe('Playlist name (fuzzy, e.g. "gym"), URI or link.'),
+        order: z
+          .enum(["playlist", "newest_first", "oldest_first", "shuffle"])
+          .default("playlist")
+          .describe("playlist = normal order; newest_first = most recently added first; oldest_first = first added first."),
+        device: deviceParam,
+      }),
+    },
+    ({ playlist: wanted, order, device: wantedDevice }) =>
+      run(async () => {
+        const playlist = await findPlaylist(env, wanted);
+        if (order === "playlist" || order === "shuffle") {
+          const device = await resolveDevice(env, wantedDevice);
+          await startPlaybackWithShuffle(env, device, { context_uri: playlist.uri }, order === "shuffle");
+          return `Playing "${playlist.name}"${order === "shuffle" ? " on shuffle" : ""}${where(device)}.`;
+        }
+
+        const tracks = await playlistTracksByDateAdded(env, playlist, order);
+        if (!tracks.uris.length) throw new SpotifyError(`"${playlist.name}" has no playable tracks.`);
+        const device = await resolveDevice(env, wantedDevice);
+        await startPlaybackWithShuffle(env, device, { uris: tracks.uris }, false);
+        const label = order === "newest_first" ? "newest to oldest" : "oldest to newest";
+        const partial =
+          tracks.uris.length < tracks.total
+            ? ` (the ${tracks.uris.length} ${order === "newest_first" ? "most recently" : "earliest"} added of ${tracks.total} tracks${tracks.sorted < tracks.total ? `, sorted from ${tracks.sorted} read` : ""})`
+            : "";
+        return `Playing "${playlist.name}" ${label}${partial}${where(device)}.`;
+      }),
+  );
+
+  server.registerTool(
+    "play_liked_songs",
+    {
+      title: "Play Liked Songs",
+      description: `Play the user's Liked Songs ("my likes"). newest_first plays the whole library in liked order; oldest_first plays the ${MAX_PLAY_URIS} earliest likes, oldest first.`,
+      inputSchema: z.object({
+        order: z.enum(["newest_first", "oldest_first", "shuffle"]).default("newest_first"),
+        device: deviceParam,
+      }),
+    },
+    ({ order, device: wantedDevice }) =>
+      run(async () => {
+        if (order !== "oldest_first") {
+          const device = await resolveDevice(env, wantedDevice);
+          const shuffle = order === "shuffle";
+          try {
+            await startPlaybackWithShuffle(env, device, { context_uri: await likedSongsContext(env) }, shuffle);
+            return `Playing your Liked Songs${shuffle ? " on shuffle" : ", newest first"}${where(device)}.`;
+          } catch (error) {
+            // Fall back to an explicit track list if Spotify won't play the Liked Songs context.
+            if (!(error instanceof SpotifyError) || error.reason === "NO_ACTIVE_DEVICE") throw error;
+            const liked = await likedTrackUris(env, "newest_first");
+            if (!liked.uris.length) throw new SpotifyError("You don't have any Liked Songs yet.");
+            await startPlaybackWithShuffle(env, device, { uris: liked.uris }, shuffle);
+            return `Playing your ${liked.uris.length} most recent Liked Songs${shuffle ? " on shuffle" : ""}${where(device)}.`;
+          }
+        }
+
+        const liked = await likedTrackUris(env, "oldest_first");
+        if (!liked.uris.length) throw new SpotifyError("You don't have any Liked Songs yet.");
+        const device = await resolveDevice(env, wantedDevice);
+        await startPlaybackWithShuffle(env, device, { uris: liked.uris }, false);
+        const scope = liked.uris.length < liked.total ? `your ${liked.uris.length} earliest Liked Songs` : "your Liked Songs";
+        return `Playing ${scope}, oldest first${where(device)}.`;
+      }),
+  );
+
+  server.registerTool(
+    "play_blend",
+    {
+      title: "Play a Blend",
+      description:
+        'Play the user\'s Spotify Blend with another person ("play my blend with jack"). The name can be rough or misspelled; it is matched fuzzily.',
+      inputSchema: z.object({
+        person: z.string().min(1).describe("The other person in the Blend, as the user said it."),
+        shuffle: z.boolean().default(false),
+        device: deviceParam,
+      }),
+    },
+    ({ person, shuffle, device: wantedDevice }) =>
+      run(async () => {
+        const blend = await findBlend(env, person);
+        const device = await resolveDevice(env, wantedDevice);
+        await startPlaybackWithShuffle(env, device, { context_uri: blend.uri }, shuffle);
+        return `Playing your Blend with ${blend.person}${shuffle ? " on shuffle" : ""}${where(device)}.`;
       }),
   );
 

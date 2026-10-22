@@ -9,4 +9,6 @@ interface Env {
   MCP_AUTH_TOKEN: string;
   /** Optional device name/ID used when nothing is active and no device is given. */
   DEFAULT_DEVICE?: string;
+  /** Optional Blend playlists, one "name: link" per line (Spotify hides Blends from apps). */
+  BLENDS?: string;
 }

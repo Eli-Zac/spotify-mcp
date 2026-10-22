@@ -1,7 +1,7 @@
 // Prints the Worker secrets found in the environment as JSON for `wrangler secret bulk`.
 // Unset or empty values are skipped, so they never overwrite what the Worker already has.
 const required = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "MCP_AUTH_TOKEN"];
-const optional = ["SPOTIFY_REFRESH_TOKEN", "DEFAULT_DEVICE"];
+const optional = ["SPOTIFY_REFRESH_TOKEN", "DEFAULT_DEVICE", "BLENDS"];
 
 const secrets = {};
 for (const name of [...required, ...optional]) {

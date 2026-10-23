@@ -15,6 +15,7 @@ import {
   getPlaybackState,
   type Device,
   type PlayResult,
+  type Track,
   toSpotifyUri,
   transferPlayback,
 } from "./spotify";
@@ -27,6 +28,8 @@ import {
   type Playlist,
   likedTrackUris,
   playlistTracksByDateAdded,
+  addTracksToPlaylist,
+  readPlaylistTracks,
 } from "./library";
 
 const INSTRUCTIONS = `Controls Spotify playback on the owner's devices (phone, computer, speakers, TV...).
@@ -36,7 +39,11 @@ const INSTRUCTIONS = `Controls Spotify playback on the owner's devices (phone, c
 - To stop the music, call \`pause\`.
 - "Play my <name> playlist" → \`play_playlist\`; "newest to oldest" / "latest first" → order newest_first.
 - "Play my likes" / "liked songs" → \`play_liked_songs\`.
-- "Play my blend with <person>" → \`play_blend\` with whatever name the user gave, even if it's rough or misspelled.`;
+- "Play my blend with <person>" → \`play_blend\` with whatever name the user gave, even if it's rough or misspelled.
+- "What's in my <name> playlist?" → \`get_playlist_tracks\`. Blends and other people's playlists can't be read.
+- "Add this / <song> to my <name> playlist" → \`add_to_playlist\` (omit \`uris\` and \`query\` to add the song that's playing).
+- "Like this song" / "add it to my likes" → \`like_song\` (omit \`uris\` and \`query\` to use the song that's playing).
+- "What's in the queue / up next?" → \`get_queue\`.`;
 
 const deviceParam = z
   .string()
@@ -433,6 +440,153 @@ export function createServer(env: Env): McpServer {
           );
         }
         return lines.join("\n");
+      }),
+  );
+
+  server.registerTool(
+    "get_playlist_tracks",
+    {
+      title: "List a playlist's tracks",
+      description: [
+        "List the tracks in one of the user's playlists, in playlist order, with their URIs and when they were added.",
+        "`playlist` can be (part of) the playlist's name, a playlist URI, or an open.spotify.com link.",
+        "Spotify only allows this for playlists the user owns or collaborates on, so Blends and other people's playlists can't be read.",
+      ].join(" "),
+      inputSchema: z.object({
+        playlist: z.string().min(1).describe('Playlist name (fuzzy, e.g. "gym"), URI or link.'),
+        limit: z.number().int().min(1).max(1000).default(100).describe("How many tracks to return."),
+        offset: z.number().int().min(0).default(0).describe("Skip this many tracks first, to page through a long playlist."),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    ({ playlist: wanted, limit, offset }) =>
+      run(async () => {
+        const playlist = await findPlaylist(env, wanted);
+        const { tracks, total } = await readPlaylistTracks(env, playlist, { limit, offset });
+        if (!tracks.length) return total ? `"${playlist.name}" has ${total} tracks, none at offset ${offset}.` : `"${playlist.name}" is empty.`;
+        const lines = tracks.map((track, index) => {
+          const added = track.addedAt ? `, added ${track.addedAt.slice(0, 10)}` : "";
+          return `${offset + index + 1}. ${track.name}${track.artists ? ` by ${track.artists}` : ""} — ${track.uri}${added}`;
+        });
+        const shown = offset + tracks.length;
+        const header = `"${playlist.name}" (${total} track${total === 1 ? "" : "s"}), showing ${offset + 1}-${shown}:`;
+        const more = shown < total ? `\n(${total - shown} more; use offset ${shown})` : "";
+        return `${header}\n${lines.join("\n")}${more}`;
+      }),
+  );
+
+  server.registerTool(
+    "add_to_playlist",
+    {
+      title: "Add to a playlist",
+      description: [
+        "Add tracks to one of the user's playlists. `playlist` can be (part of) its name, a playlist URI, or an open.spotify.com link.",
+        "Provide `uris` (track URIs or links), or `query` (the best matching track is added).",
+        "With neither, the track that is playing right now is added.",
+        "Tracks already in the playlist are skipped. Only works on playlists the user owns or collaborates on.",
+      ].join(" "),
+      inputSchema: z.object({
+        playlist: z.string().min(1).describe('Playlist name (fuzzy, e.g. "gym"), URI or link.'),
+        uris: z.array(z.string()).optional().describe("Track URIs (spotify:track:...) or open.spotify.com links."),
+        query: z.string().optional().describe("Search text; the best matching track is added."),
+        allow_duplicates: z
+          .boolean()
+          .default(false)
+          .describe("Add tracks even if the playlist already has them."),
+      }),
+    },
+    ({ playlist: wanted, uris, query, allow_duplicates }) =>
+      run(async () => {
+        const playlist = await findPlaylist(env, wanted);
+
+        let targets: string[];
+        let label: string;
+        if (uris?.length) {
+          targets = uris.map(toSpotifyUri);
+          const bad = targets.find((uri) => !uri.startsWith("spotify:track:"));
+          if (bad) throw new SpotifyError(`${bad} is not a track; only tracks can be added.`);
+          label = targets.length === 1 ? targets[0]! : `${targets.length} tracks`;
+        } else if (query) {
+          const [match] = await search(env, query, "track", 5);
+          if (!match) throw new SpotifyError(`No track found for "${query}".`);
+          targets = [match.uri];
+          label = describeItem(match, "track");
+        } else {
+          const state = await getPlaybackState(env);
+          const item = state?.item;
+          if (!item || item.type !== "track") throw new SpotifyError("Nothing is playing right now. Provide `uris` or `query`.");
+          // A swapped-in regional version keeps the URI the playlist would know it by.
+          targets = [item.linked_from?.uri ?? item.uri];
+          label = describeTrack(item);
+        }
+
+        const { added, skipped } = await addTracksToPlaylist(env, playlist, targets, { skipDuplicates: !allow_duplicates });
+        if (!added.length) return `${label} is already in "${playlist.name}", so nothing was added.`;
+        const dupes = skipped.length ? ` (${skipped.length} already there, skipped)` : "";
+        return `Added ${label} to "${playlist.name}"${dupes}.`;
+      }),
+  );
+
+  server.registerTool(
+    "like_song",
+    {
+      title: "Like / unlike songs",
+      description: [
+        "Save tracks to the user's Liked Songs (\"like this\"), or remove them with `unlike`.",
+        "Provide `uris` (track URIs or links), or `query` (the best matching track).",
+        "With neither, the track that is playing right now is used.",
+      ].join(" "),
+      inputSchema: z.object({
+        uris: z.array(z.string()).optional().describe("Track URIs (spotify:track:...) or open.spotify.com links."),
+        query: z.string().optional().describe("Search text; the best matching track is used."),
+        unlike: z.boolean().default(false).describe("Remove from Liked Songs instead of adding."),
+      }),
+    },
+    ({ uris, query, unlike }) =>
+      run(async () => {
+        let targets: string[];
+        let label: string;
+        if (uris?.length) {
+          targets = uris.map(toSpotifyUri);
+          const bad = targets.find((uri) => !uri.startsWith("spotify:track:"));
+          if (bad) throw new SpotifyError(`${bad} is not a track; only tracks can be liked.`);
+          label = targets.length === 1 ? targets[0]! : `${targets.length} tracks`;
+        } else if (query) {
+          const [match] = await search(env, query, "track", 5);
+          if (!match) throw new SpotifyError(`No track found for "${query}".`);
+          targets = [match.uri];
+          label = describeItem(match, "track");
+        } else {
+          const item = (await getPlaybackState(env))?.item;
+          if (!item || item.type !== "track") throw new SpotifyError("Nothing is playing right now. Provide `uris` or `query`.");
+          targets = [item.linked_from?.uri ?? item.uri];
+          label = describeTrack(item);
+        }
+        for (let i = 0; i < targets.length; i += 40) {
+          await spotify(env, unlike ? "DELETE" : "PUT", "/me/library", { query: { uris: targets.slice(i, i + 40).join(",") } });
+        }
+        return unlike ? `Removed ${label} from your Liked Songs.` : `Added ${label} to your Liked Songs.`;
+      }),
+  );
+
+  server.registerTool(
+    "get_queue",
+    {
+      title: "Get the play queue",
+      description: "Show what is playing now and what is coming up next in the queue.",
+      annotations: { readOnlyHint: true },
+    },
+    () =>
+      run(async () => {
+        const result = await spotify<{ currently_playing: Track | null; queue: Track[] }>(env, "GET", "/me/player/queue");
+        if (!result?.currently_playing) return "Nothing is playing and the queue is empty.";
+        const upcoming = result.queue ?? [];
+        const lines = upcoming.slice(0, 30).map((track, index) => `${index + 1}. ${describeTrack(track)} — ${track.uri}`);
+        if (upcoming.length > lines.length) lines.push(`(${upcoming.length - lines.length} more)`);
+        return [
+          `Now playing: ${describeTrack(result.currently_playing)}`,
+          upcoming.length ? `Up next:\n${lines.join("\n")}` : "Nothing is queued after this.",
+        ].join("\n");
       }),
   );
 

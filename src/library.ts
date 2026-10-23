@@ -126,11 +126,119 @@ export async function findPlaylist(env: Env, wanted: string): Promise<Playlist> 
   return fuzzyFind(await listMyPlaylists(env), wanted, (playlist) => [playlist.name], describePlaylist, "playlist");
 }
 
+interface EntryTrack {
+  uri: string;
+  name?: string;
+  is_local?: boolean;
+  artists?: { name: string }[];
+  linked_from?: { uri: string };
+}
+
 interface PlaylistEntry {
   added_at?: string | null;
   // Renamed from `track` to `item` in Spotify's February 2026 API update.
-  item?: { uri: string; is_local?: boolean } | null;
-  track?: { uri: string; is_local?: boolean } | null;
+  item?: EntryTrack | null;
+  track?: EntryTrack | null;
+}
+
+export interface PlaylistTrack {
+  uri: string;
+  /** The URI the track was originally saved under, when Spotify swapped in your country's version. */
+  originalUri?: string;
+  name: string;
+  artists: string;
+  addedAt: string | null;
+}
+
+const MAX_READ_TRACKS = MAX_PLAYLIST_PAGES * PAGE_SIZE;
+
+/**
+ * Reads a window of a playlist's tracks in playlist order. Spotify only returns
+ * the tracks of playlists you own or collaborate on.
+ */
+export async function readPlaylistTracks(
+  env: Env,
+  playlist: Playlist,
+  options: { offset?: number; limit?: number } = {},
+): Promise<{ tracks: PlaylistTrack[]; total: number }> {
+  const offset = Math.max(0, options.offset ?? 0);
+  const limit = Math.min(MAX_READ_TRACKS, Math.max(1, options.limit ?? 100));
+  const fetchPage = (from: number) =>
+    spotify<Page<PlaylistEntry>>(env, "GET", `/playlists/${playlist.id}/items`, {
+      query: { limit: PAGE_SIZE, offset: from },
+    });
+
+  let first: Page<PlaylistEntry> | null;
+  try {
+    first = await fetchPage(offset);
+  } catch (error) {
+    if (error instanceof SpotifyError && (error.status === 403 || error.status === 404)) {
+      throw new SpotifyError(
+        `Spotify only lets this server read the track list of playlists you own or collaborate on, so it can't read "${playlist.name}" (Blends and other people's playlists are hidden from apps).`,
+        error.status,
+      );
+    }
+    throw error;
+  }
+  const total = first?.total ?? 0;
+
+  const offsets: number[] = [];
+  for (let from = offset; from < Math.min(total, offset + limit); from += PAGE_SIZE) offsets.push(from);
+  const pages = await Promise.all(offsets.map((from) => (from === offset ? first : fetchPage(from))));
+
+  const tracks = pages
+    .flatMap((page) => page?.items ?? [])
+    .slice(0, limit)
+    .flatMap((entry): PlaylistTrack[] => {
+      const track = entry?.item ?? entry?.track;
+      if (!track?.uri) return [];
+      return [
+        {
+          uri: track.uri,
+          originalUri: track.linked_from?.uri,
+          name: track.name ?? track.uri,
+          artists: track.artists?.map((artist) => artist.name).join(", ") ?? "",
+          addedAt: entry?.added_at ?? null,
+        },
+      ];
+    });
+  return { tracks, total };
+}
+
+/**
+ * Adds tracks to one of your playlists, skipping any already in it (unless told not to).
+ * Needs the playlist-modify scopes, and a playlist you own or collaborate on.
+ */
+export async function addTracksToPlaylist(
+  env: Env,
+  playlist: Playlist,
+  uris: string[],
+  options: { skipDuplicates?: boolean } = {},
+): Promise<{ added: string[]; skipped: string[] }> {
+  let toAdd = [...new Set(uris)];
+  let skipped: string[] = [];
+
+  if (options.skipDuplicates ?? true) {
+    const { tracks } = await readPlaylistTracks(env, playlist, { limit: MAX_READ_TRACKS });
+    const existing = new Set(tracks.flatMap((track) => [track.uri, track.originalUri].filter(Boolean) as string[]));
+    skipped = toAdd.filter((uri) => existing.has(uri));
+    toAdd = toAdd.filter((uri) => !existing.has(uri));
+  }
+
+  if (toAdd.length) {
+    try {
+      await spotify(env, "POST", `/playlists/${playlist.id}/items`, { body: { uris: toAdd } });
+    } catch (error) {
+      if (error instanceof SpotifyError && error.status === 403 && error.reason !== "INSUFFICIENT_SCOPE") {
+        throw new SpotifyError(
+          `Spotify wouldn't let this server change "${playlist.name}". Playlists can only be edited if you own or collaborate on them.`,
+          403,
+        );
+      }
+      throw error;
+    }
+  }
+  return { added: toAdd, skipped };
 }
 
 export interface OrderedTracks {

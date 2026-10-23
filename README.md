@@ -22,6 +22,10 @@ It runs as one Cloudflare Worker with no databases or other bindings. Your crede
 | `play_playlist` | Plays one of your playlists by (rough) name, in normal order, shuffled, **newest to oldest** or oldest to newest (by date added). |
 | `play_liked_songs` | Plays your Liked Songs: newest first, oldest first, or shuffled. |
 | `play_blend` | Plays your Blend with someone ("play my blend with jak" finds Jack). |
+| `get_playlist_tracks` | Lists the tracks in one of your playlists (name, artists, URI, date added). Only playlists you own or collaborate on; Blends can't be read. |
+| `add_to_playlist` | Adds tracks (URIs, a search query, or the song that's playing) to one of your playlists, skipping ones already there. |
+| `like_song` | Likes (or unlikes) tracks: URIs, a search query, or the song that's playing. |
+| `get_queue` | Shows what's playing and what's coming up next. |
 
 **Devices** can be given by name, part of a name ("kitchen", "iphone"), type ("phone", "speaker", "computer", "tv") or ID. If you don't name one, the server picks in this order: the device that's playing now, then `DEFAULT_DEVICE` (if you set it), then your only device if there's just one. Otherwise it asks Claude to choose. A device only shows up while Spotify is open on it.
 
@@ -133,4 +137,5 @@ For local `/setup`, also add `http://127.0.0.1:8787/callback` as a redirect URI 
 - **Secrets show ✗ on the status page**: check that the Deploy workflow ran without errors, and that its "Sync secrets" step lists them. Its log never shows the values.
 - **`INVALID_CLIENT: Invalid redirect URI`** during setup: the redirect URI in the Spotify dashboard has to match `https://<your-worker-host>/callback` exactly.
 - **"missing a permission"** when playing Liked Songs: Liked Songs needs a permission added after your first setup. Run `/setup/<token>` again, update `SPOTIFY_REFRESH_TOKEN` and re-run the workflow.
+- **"missing a permission"** when adding to a playlist or liking a song: these need the playlist-modify and library-modify permissions, added after the first release. Run `/setup/<token>` again, update `SPOTIFY_REFRESH_TOKEN` and re-run the workflow.
 - **Logs**: open the Worker in the Cloudflare dashboard and go to **Observability**.

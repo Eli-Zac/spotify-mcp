@@ -10,6 +10,11 @@ export const SPOTIFY_SCOPES = [
   "playlist-read-private",
   "playlist-read-collaborative",
   "user-library-read",
+  // Lets like_song save and remove Liked Songs.
+  "user-library-modify",
+  // Lets add_to_playlist change your playlists.
+  "playlist-modify-private",
+  "playlist-modify-public",
   // Lets market=from_token pick the versions of tracks that play in your country.
   "user-read-private",
 ];
